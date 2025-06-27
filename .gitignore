@@ -1,0 +1,15 @@
+# Arquivo de credenciais e variáveis de ambiente
+# NUNCA envie este arquivo para o repositório!
+.env
+
+# Arquivos de cache e compilados do Python
+__pycache__/
+*.pyc
+
+# Pastas de ambiente virtual
+venv/
+env/
+*.venv
+
+# Arquivos de configuração de editores (ex: VSCode)
+.vscode/
