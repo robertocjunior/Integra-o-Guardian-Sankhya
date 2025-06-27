@@ -5,12 +5,15 @@ import json
 import sys
 import pyodbc
 from datetime import datetime
+import io # Importa para capturar a saída do console
+from flask import Flask, Response, stream_with_context # Importa o Flask
+
+# Inicializa a aplicação Flask
+app = Flask(__name__)
+
+# --- Funções de Lógica de Negócio (praticamente as mesmas, mas os 'print's serão capturados) ---
 
 def load_credentials():
-    """
-    Carrega e valida as credenciais do arquivo .env.
-    Retorna um dicionário com as credenciais ou encerra o script se alguma estiver faltando.
-    """
     load_dotenv(override=True)
 
     api_required_vars = ["TOKEN", "APPKEY", "USERNAME_API", "PASSWORD_API"]
@@ -35,9 +38,6 @@ def load_credentials():
     return credentials
 
 def perform_login(credentials):
-    """
-    Executa a requisição de login para a API Sankhya e trata a resposta.
-    """
     url = "https://api.sankhya.com.br/login"
 
     headers = {
@@ -72,9 +72,6 @@ def perform_login(credentials):
     return None
 
 def connect_to_sql_server(credentials):
-    """
-    Estabelece uma conexão com o banco de dados SQL Server usando credenciais do .env.
-    """
     server = credentials["db_server"]
     database = credentials["db_database"]
     username = credentials["db_username"]
@@ -100,17 +97,12 @@ def connect_to_sql_server(credentials):
         sys.exit(1)
 
 def update_sankhya_partner_status(codparc, bearer_token):
-    """
-    Atualiza o campo AD_IMPORTADOGUARDIAN para 'S' no Sankhya para um CODPARC específico.
-    """
     url = "https://api.sankhya.com.br/gateway/v1/mge/service.sbr?serviceName=DatasetSP.save&outputType=json"
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {bearer_token}"
     }
     
-    # Payload para atualizar o campo AD_IMPORTADOGUARDIAN
-    # O "1" em "values":{"1":"S"} refere-se à segunda coluna (índice 1) na lista "fields"
     payload = {
         "serviceName": "DatasetSP.save",
         "requestBody": {
@@ -123,10 +115,10 @@ def update_sankhya_partner_status(codparc, bearer_token):
             "records": [
                 {
                     "pk": {
-                        "CODPARC": str(codparc) # CODPARC como string
+                        "CODPARC": str(codparc)
                     },
                     "values": {
-                        "1": "S" # Definindo 'S' para AD_IMPORTADOGUARDIAN
+                        "1": "S" # 'S' para indicar que foi importado
                     }
                 }
             ]
@@ -136,7 +128,7 @@ def update_sankhya_partner_status(codparc, bearer_token):
     print(f"--- Tentando atualizar AD_IMPORTADOGUARDIAN para 'S' no Sankhya para CODPARC: {codparc} ---")
     try:
         response = requests.post(url, headers=headers, json=payload)
-        response.raise_for_status() # Lança exceção para erros HTTP
+        response.raise_for_status()
         response_data = response.json()
         
         if response_data.get("status") == "1":
@@ -151,12 +143,7 @@ def update_sankhya_partner_status(codparc, bearer_token):
             print(f"Status Code: {e.response.status_code}")
             print(f"Resposta do servidor: {e.response.text}")
 
-def insert_partners_into_sql(records, sql_conn, bearer_token): # <<<< Modificado: Recebe bearer_token
-    """
-    Insere os dados dos parceiros na tabela tbTransportadora do SQL Server,
-    mapeando os campos da API para as colunas da tabela e adicionando TRP_DATA e TRP_ESTADO.
-    Após a inserção bem-sucedida, atualiza o status no Sankhya.
-    """
+def insert_partners_into_sql(records, sql_conn, bearer_token):
     if not records:
         print("Nenhum registro para inserir no SQL Server.")
         return
@@ -171,7 +158,6 @@ def insert_partners_into_sql(records, sql_conn, bearer_token): # <<<< Modificado
     """
     print("\n--- Inserindo dados na tabela tbTransportadora do SQL Server ---")
     
-    # Lista para armazenar CODPARC dos registros inseridos com sucesso
     codparcs_inserted_successfully = [] 
     
     try:
@@ -190,7 +176,7 @@ def insert_partners_into_sql(records, sql_conn, bearer_token): # <<<< Modificado
             trp_est_codigo = record.get("SNK_EST_CODIGO", {}).get("$", None)
             trp_cep = record.get("SNK_CEP", {}).get("$", None)
             trp_telefone = record.get("SNK_TELEFONE", {}).get("$", None)
-            codparc_api = record.get("CODPARC", {}).get("$", None) # <<<< Extraindo CODPARC da API
+            codparc_api = record.get("CODPARC", {}).get("$", None)
 
             cursor.execute(
                 insert_sql,
@@ -198,14 +184,12 @@ def insert_partners_into_sql(records, sql_conn, bearer_token): # <<<< Modificado
                 trp_inscricao_estadual, trp_endereco, trp_complemento,
                 trp_municipio, trp_est_codigo, trp_cep, trp_telefone, current_datetime, trp_estado_value
             )
-            # Se a inserção individual no cursor não levantar erro, adicione à lista
             if codparc_api:
                 codparcs_inserted_successfully.append(codparc_api)
 
-        sql_conn.commit() # Confirma todas as alterações no banco de dados de uma vez
+        sql_conn.commit()
         print(f"✅ {len(records)} registros inseridos com sucesso na tabela tbTransportadora!")
 
-        # <<<< Novo: Chamar a API Sankhya para cada registro inserido com sucesso
         if codparcs_inserted_successfully:
             print("\n--- Atualizando status AD_IMPORTADOGUARDIAN no Sankhya ---")
             for codparc in codparcs_inserted_successfully:
@@ -214,17 +198,13 @@ def insert_partners_into_sql(records, sql_conn, bearer_token): # <<<< Modificado
             print("Nenhum CODPARC válido para atualizar no Sankhya após a inserção.")
 
     except pyodbc.Error as ex:
-        sql_conn.rollback() # Reverte a transação em caso de erro
+        sql_conn.rollback()
         print(f"❌ Erro ao inserir dados no SQL Server: {ex}")
         print(f"Detalhes do erro: {ex.args[1]}")
     finally:
         cursor.close()
 
 def get_guardian_partners(token, sql_conn):
-    """
-    Busca os dados da view 'VIEW_PARCEIROS_GUARDIAN' usando o serviço CRUDServiceProvider
-    e tenta inseri-los no SQL Server.
-    """
     url = "https://api.sankhya.com.br/gateway/v1/mge/service.sbr?serviceName=CRUDServiceProvider.loadView&outputType=json"
 
     print(f"\n--- Buscando parceiros da view 'VIEW_PARCEIROS_GUARDIAN' na API Sankhya ---")
@@ -233,7 +213,6 @@ def get_guardian_partners(token, sql_conn):
         "Authorization": f"Bearer {token}"
     }
 
-    # <<<< Modificado: Payload para incluir CODPARC na consulta
     payload = {
         "serviceName": "CRUDServiceProvider.loadView",
         "requestBody": {
@@ -259,7 +238,6 @@ def get_guardian_partners(token, sql_conn):
 
         records = response_data.get("responseBody", {}).get("records", {}).get("record", [])
         if records:
-            # <<<< Modificado: Passa o token também para insert_partners_into_sql
             insert_partners_into_sql(records, sql_conn, token)
         else:
             print("Nenhum registro de parceiro encontrado na resposta da API.")
@@ -271,9 +249,6 @@ def get_guardian_partners(token, sql_conn):
             print(f"Resposta do servidor: {e.response.text}")
 
 def perform_logout(token, appkey):
-    """
-    Encerra a sessão na API Sankhya (logout).
-    """
     url = "https://api.sankhya.com.br/gateway/v1/mge/service.sbr?serviceName=MobileLoginSP.logout&outputType=json"
 
     print("\n--- Encerrando a sessão (logout) da API Sankhya ---")
@@ -301,25 +276,121 @@ def perform_logout(token, appkey):
             print(f"Status Code: {e.response.status_code}")
             print(f"Resposta do servidor: {e.response.text}")
 
-if __name__ == "__main__":
-    credentials = load_credentials()
-    bearer_token = perform_login(credentials)
+# --- Nova função para envolver a lógica principal e capturar a saída ---
+def run_integration_process():
+    # Redireciona sys.stdout para um buffer em memória
+    old_stdout = sys.stdout
+    redirected_output = io.StringIO()
+    sys.stdout = redirected_output
 
-    sql_connection = None
+    try:
+        credentials = load_credentials()
+        bearer_token = perform_login(credentials)
 
-    if bearer_token:
-        try:
-            print(f"\n🔑 Bearer Token da API armazenado com sucesso.")
+        sql_connection = None
 
-            sql_connection = connect_to_sql_server(credentials)
+        if bearer_token:
+            try:
+                print(f"\n🔑 Bearer Token da API armazenado com sucesso.")
+                sql_connection = connect_to_sql_server(credentials)
+                if sql_connection:
+                    get_guardian_partners(bearer_token, sql_connection)
+            finally:
+                if bearer_token:
+                    perform_logout(bearer_token, credentials['appkey'])
+                if sql_connection:
+                    sql_connection.close()
+                    print("Conexão com o SQL Server fechada.")
+        else:
+            print("\nFalha ao obter o Bearer Token da API. As próximas requisições não serão executadas.")
+    except SystemExit: # Captura sys.exit() para evitar que o servidor Flask seja derrubado por um erro crítico
+        print("\nProcesso encerrado devido a um erro crítico.")
+    finally:
+        # Restaura sys.stdout para o original
+        sys.stdout = old_stdout
+        # Retorna todo o conteúdo capturado do buffer
+        return redirected_output.getvalue()
 
-            if sql_connection:
-                get_guardian_partners(bearer_token, sql_connection)
-        finally:
-            if bearer_token:
-                perform_logout(bearer_token, credentials['appkey'])
-            if sql_connection:
-                sql_connection.close()
-                print("Conexão com o SQL Server fechada.")
-    else:
-        print("\nFalha ao obter o Bearer Token da API. As próximas requisições não serão executadas.")
+# --- Rotas Flask para a interface web ---
+
+@app.route('/')
+def index():
+    # Página inicial com um botão para iniciar a integração
+    return """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Integração Guardian</title>
+        <style>
+            body { font-family: sans-serif; background-color: #f4f4f4; color: #333; margin: 0; padding: 20px; text-align: center;}
+            .container { max-width: 800px; margin: 50px auto; background-color: #fff; padding: 30px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+            h1 { color: #007bff; margin-bottom: 20px; }
+            p { margin-bottom: 30px; }
+            button {
+                background-color: #007bff;
+                color: white;
+                padding: 12px 25px;
+                border: none;
+                border-radius: 5px;
+                cursor: pointer;
+                font-size: 18px;
+                transition: background-color 0.3s ease;
+            }
+            button:hover { background-color: #0056b3; }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1>Executar Integração Guardian - Sankhya/SQL Server</h1>
+            <p>Clique no botão abaixo para iniciar o processo de integração. O resultado detalhado será exibido nesta página.</p>
+            <form action="/run_integration" method="get">
+                <button type="submit">Iniciar Integração</button>
+            </form>
+        </div>
+    </body>
+    </html>
+    """
+
+@app.route('/run_integration')
+def run_integration():
+    # Executa o processo de integração e captura a saída
+    output = run_integration_process()
+    
+    # Retorna a saída formatada como HTML pré-formatado para manter quebras de linha e espaços.
+    # Adicionei um pouco de estilo para simular um terminal.
+    return f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Relatório de Integração Guardian</title>
+        <style>
+            body {{ font-family: monospace; background-color: #1e1e1e; color: #d4d4d4; padding: 20px; }}
+            pre {{ white-space: pre-wrap; word-wrap: break-word; background-color: #000; padding: 15px; border-radius: 5px; overflow-x: auto; }}
+            h1 {{ color: #007bff; }}
+            button {{
+                background-color: #007bff;
+                color: white;
+                padding: 10px 20px;
+                border: none;
+                border-radius: 5px;
+                cursor: pointer;
+                font-size: 16px;
+                margin-bottom: 20px;
+            }}
+            button:hover {{ background-color: #0056b3; }}
+        </style>
+    </head>
+    <body>
+        <h1>Relatório de Integração Guardian</h1>
+        <button onclick="window.location.href='/'">Voltar</button>
+        <pre>{output}</pre>
+    </body>
+    </html>
+    """
+
+# Inicia o servidor Flask
+if __name__ == '__main__':
+    # debug=True é ótimo para desenvolvimento, pois reinicia o servidor
+    # automaticamente em mudanças no código e mostra erros detalhados.
+    # Para produção, você deve usar um servidor WSGI como Gunicorn ou Waitress.
+    app.run(debug=True)

@@ -1,6 +1,7 @@
 # Arquivo de credenciais e variáveis de ambiente
 # NUNCA envie este arquivo para o repositório!
 .env
+config.ini
 
 # Arquivos de cache e compilados do Python
 __pycache__/
